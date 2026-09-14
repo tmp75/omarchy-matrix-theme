@@ -5,10 +5,8 @@ matrix-rain wallpaper and idle-fading terminals.
 
 ![accent](https://img.shields.io/badge/accent-%2300FF41-000000)
 
-<p>
-  <img src="backgrounds/1-digital-rain.png" width="49%" alt="Digital rain background">
-  <img src="screenshots/terminal.png" width="49%" alt="Terminal colors">
-</p>
+<img src="screenshots/setup.png" width="500" alt="Matrix theme running across two screens">
+
 
 ## Install (theme only)
 
