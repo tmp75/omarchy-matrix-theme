@@ -1,0 +1,148 @@
+#!/bin/bash
+# omarchy-matrix-idle-rain
+#
+# While the "matrix" Omarchy theme is active, fades each kitty terminal's
+# background so the animated rain wallpaper layer shows through the empty
+# cells behind the text. kitty's background_opacity only touches cell
+# backgrounds, not glyphs, so the text itself never gets touched.
+#
+# A window counts as idle once it's unfocused, the mouse isn't over it, AND
+# its title has settled (a running claude/codex prompt changes the window
+# title, which pauses the idle clock and instantly restores full opacity).
+# Focusing the window, hovering it, or the title going busy again all reset
+# the clock immediately.
+
+set -uo pipefail
+
+IDLE_THRESHOLD=${MATRIX_RAIN_IDLE_SECONDS:-60}
+DIM_OPACITY=${MATRIX_RAIN_OPACITY:-0.75}
+POLL_INTERVAL=1
+THEME_NAME_FILE="$HOME/.local/state/omarchy/current/theme.name"
+RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+
+declare -A idle_since
+declare -A dimmed
+declare -A baseline_title
+declare -A last_title
+declare -A stable_count
+declare -A pid_of
+
+set_opacity() {
+  local pid=$1 value=$2
+  local sock="$RUNTIME_DIR/omarchy-kitty-$pid"
+  [[ -S $sock ]] || return 1
+  timeout 1 kitty @ --to "unix:$sock" set-background-opacity "$value" >/dev/null 2>&1
+}
+
+is_matrix_theme() {
+  local name
+  name=$(tr -d '[:space:]' <"$THEME_NAME_FILE" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+  [[ $name == "matrix" ]]
+}
+
+forget_window() {
+  local addr=$1
+  unset "idle_since[$addr]" "dimmed[$addr]" "baseline_title[$addr]" \
+    "last_title[$addr]" "stable_count[$addr]" "pid_of[$addr]"
+}
+
+undim_all() {
+  local addr
+  for addr in "${!dimmed[@]}"; do
+    [[ ${dimmed[$addr]} == 1 ]] && set_opacity "${pid_of[$addr]:-}" 1.0
+  done
+  idle_since=(); dimmed=(); baseline_title=(); last_title=(); stable_count=(); pid_of=()
+}
+
+on_term() { undim_all; exit 0; }
+trap on_term TERM INT
+
+while true; do
+  if ! is_matrix_theme; then
+    (( ${#dimmed[@]} > 0 )) && undim_all
+    sleep 2
+    continue
+  fi
+
+  clients_json=$(hyprctl clients -j 2>/dev/null) || { sleep "$POLL_INTERVAL"; continue; }
+  monitors_json=$(hyprctl monitors -j 2>/dev/null) || monitors_json='[]'
+  active_addr=$(hyprctl activewindow -j 2>/dev/null | jq -r '.address // empty')
+  cursor_json=$(hyprctl cursorpos -j 2>/dev/null)
+  cx=$(jq -r '.x // -1' <<<"$cursor_json")
+  cy=$(jq -r '.y // -1' <<<"$cursor_json")
+  now=$(date +%s)
+  seen=()
+
+  while IFS=$'\t' read -r addr pid title x y w h onscreen; do
+    [[ -z $addr ]] && continue
+    comm=$(ps -p "$pid" -o comm= 2>/dev/null)
+    [[ $comm == kitty* ]] || continue
+    seen+=("$addr")
+    pid_of[$addr]=$pid
+
+    focused=0
+    [[ -n $active_addr && $addr == "$active_addr" ]] && focused=1
+
+    # Every workspace reuses the same 0..width/0..height range on its
+    # monitor, so a window on a workspace nobody is looking at can still
+    # collide with the cursor's position on whatever workspace IS showing.
+    # onscreen (workspace == its monitor's active workspace) rules that out;
+    # hyprctl's own "visible" field doesn't — it's true for both.
+    hovered=0
+    if [[ $onscreen == "true" && $cx != -1 && $cy != -1 ]] \
+      && (( cx >= x && cx < x + w && cy >= y && cy < y + h )); then
+      hovered=1
+    fi
+
+    busy=0
+    if [[ -z ${baseline_title[$addr]:-} ]]; then
+      # First sighting: don't dim until we've seen a settled title.
+      baseline_title[$addr]="$title"
+      stable_count[$addr]=1
+      busy=1
+    elif [[ $title == "${baseline_title[$addr]}" ]]; then
+      busy=0
+    else
+      busy=1
+      if [[ ${last_title[$addr]:-} == "$title" ]]; then
+        stable_count[$addr]=$(( ${stable_count[$addr]:-0} + 1 ))
+        if (( ${stable_count[$addr]} >= 3 )); then
+          baseline_title[$addr]="$title"
+          busy=0
+        fi
+      else
+        stable_count[$addr]=1
+      fi
+    fi
+    last_title[$addr]="$title"
+
+    if (( focused || hovered || busy )); then
+      idle_since[$addr]=$now
+      if [[ ${dimmed[$addr]:-0} == 1 ]]; then
+        set_opacity "$pid" 1.0
+        dimmed[$addr]=0
+      fi
+    else
+      since=${idle_since[$addr]:-$now}
+      if (( now - since >= IDLE_THRESHOLD )) && [[ ${dimmed[$addr]:-0} != 1 ]]; then
+        set_opacity "$pid" "$DIM_OPACITY"
+        dimmed[$addr]=1
+      fi
+    fi
+  done < <(jq -r --argjson monitors "$monitors_json" '
+    ($monitors | map({(.id | tostring): .activeWorkspace.id}) | add // {}) as $active
+    | .[] | select(.mapped == true)
+    | . as $c
+    | (($active[($c.monitor | tostring)] // null) == $c.workspace.id) as $onscreen
+    | [$c.address, $c.pid, $c.title, $c.at[0], $c.at[1], $c.size[0], $c.size[1], $onscreen]
+    | @tsv
+  ' <<<"$clients_json")
+
+  for addr in "${!pid_of[@]}"; do
+    still_open=0
+    for s in "${seen[@]:-}"; do [[ $s == "$addr" ]] && { still_open=1; break; }; done
+    (( still_open )) || forget_window "$addr"
+  done
+
+  sleep "$POLL_INTERVAL"
+done
