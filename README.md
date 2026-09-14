@@ -8,7 +8,7 @@ matrix-rain wallpaper and idle-fading terminals.
 ## Install (theme only)
 
 ```bash
-omarchy theme install https://github.com/<your-username>/omarchy-matrix-theme.git
+omarchy theme install https://github.com/tmp75/omarchy-matrix-theme.git
 ```
 
 This clones straight into `~/.config/omarchy/themes/matrix` and applies it.
@@ -27,7 +27,7 @@ The extras are optional and off by default outside this theme. They add:
   window title is treated as busy and never fades.
 
 ```bash
-omarchy theme install https://github.com/<your-username>/omarchy-matrix-theme.git
+omarchy theme install https://github.com/tmp75/omarchy-matrix-theme.git
 cd ~/.config/omarchy/themes/matrix
 ./install-extras.sh
 omarchy theme set matrix
